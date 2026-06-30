@@ -111,8 +111,11 @@ app.prepare().then(() => {
         if (!upperCode) return socket.emit('room-error', 'Room code is required')
         const room = rooms[upperCode]
         if (!room) return socket.emit('room-error', 'Room not found — check the code')
-        if (room.phase !== 'waiting') return socket.emit('room-error', 'Game already in progress')
-        if (room.players.length >= 4) return socket.emit('room-error', 'Room is full (4/4)')
+
+        const activeCount = room.players.filter(p => !p.isSpectator).length
+        // Block new active players if game already started without them
+        if (room.phase !== 'waiting' && activeCount < 4) return socket.emit('room-error', 'Game already in progress')
+        if (room.players.length >= 8) return socket.emit('room-error', 'Room is full (8/8)')
 
         const { error, player } = engine.joinRoom(upperCode, socket.id, name.trim())
         if (error) return socket.emit('room-error', error)
@@ -121,13 +124,56 @@ app.prepare().then(() => {
         socket.emit('room-joined', { code: upperCode, player })
         broadcastState(room)
 
-        if (room.players.length === 4) {
+        const newActiveCount = room.players.filter(p => !p.isSpectator).length
+        if (newActiveCount === 4 && room.phase === 'waiting') {
           engine.dealInitial(room)
           broadcastState(room)
         }
       } catch (e) {
         console.error('join-room error:', e)
         socket.emit('room-error', 'Server error')
+      }
+    })
+
+    // ── Rejoin after disconnect / tab close ──
+    socket.on('rejoin-room', ({ name, code }) => {
+      try {
+        const upperCode = (code || '').toUpperCase().trim()
+        if (!name || !upperCode) return socket.emit('rejoin-failed', 'Missing info')
+        const room = rooms[upperCode]
+        if (!room) return socket.emit('rejoin-failed', 'Room gone')
+
+        // Find their old player slot by name (case-insensitive)
+        const player = room.players.find(
+          p => p.name.toLowerCase() === name.trim().toLowerCase() && !isBot(p.id)
+        )
+
+        if (player) {
+          // Swap socket ID
+          const oldId = player.id
+          player.id = socket.id
+          if (room.hands[oldId] !== undefined) {
+            room.hands[socket.id] = room.hands[oldId]
+            delete room.hands[oldId]
+          }
+          if (room.currentTurn === oldId) room.currentTurn = socket.id
+          if (room.trumpCaller === oldId) room.trumpCaller = socket.id
+          room.currentTrick = room.currentTrick.map(t =>
+            t.playerId === oldId ? { ...t, playerId: socket.id } : t
+          )
+          if (room.lastTrickResult?.winnerId === oldId) room.lastTrickResult.winnerId = socket.id
+          delete playerRooms[oldId]
+          playerRooms[socket.id] = upperCode
+          socket.join(upperCode)
+          socket.emit('room-joined', { code: upperCode, player: { position: player.position, team: player.team, isSpectator: player.isSpectator } })
+          broadcastState(room)
+        } else {
+          // Not in this room — let client fall back to fresh join
+          socket.emit('rejoin-failed', 'Not in room')
+        }
+      } catch (e) {
+        console.error('rejoin-room error:', e)
+        socket.emit('rejoin-failed', 'Server error')
       }
     })
 

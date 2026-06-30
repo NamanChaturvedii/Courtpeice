@@ -2,13 +2,15 @@
 import { useState } from 'react'
 
 const TEAM_COLOR = ['#3b82f6', '#ef4444']
-const SEAT_LABEL = ['South (You)', 'West', 'North (Partner)', 'East']
+const SEAT_LABEL = ['South', 'West', 'North (Partner)', 'East']
 
 export default function WaitingRoom({ room, myId, roomCode, onBack, onAddBots }) {
   const [copied, setCopied] = useState(false)
-  const players = room?.players || []
-  const mode    = room?.mode || '…'
-  const canAddBots = players.length >= 1 && players.length < 4
+  const players       = room?.players || []
+  const mode          = room?.mode || '…'
+  const activePlayers = players.filter(p => !p.isSpectator)
+  const spectators    = players.filter(p => p.isSpectator)
+  const canAddBots    = activePlayers.length >= 1 && activePlayers.length < 4
 
   function copyLink() {
     const url = `${window.location.origin}/room/${roomCode}`
@@ -18,12 +20,56 @@ export default function WaitingRoom({ room, myId, roomCode, onBack, onAddBots })
     })
   }
 
+  function Slot({ pos, isSpectatorSlot }) {
+    const player = players.find(p => p.position === pos)
+    const isMe   = player?.id === myId
+    const isBot  = player?.id?.startsWith('__bot__')
+    const team   = pos % 2
+    return (
+      <div className="flex items-center gap-3 px-3 py-2 rounded-lg transition-all"
+        style={{
+          background: player ? 'rgba(255,255,255,0.06)' : 'rgba(255,255,255,0.02)',
+          border: `1px solid ${player ? 'rgba(255,255,255,0.1)' : 'rgba(255,255,255,0.04)'}`,
+        }}>
+        <span className="text-lg" style={{ color: player ? (isSpectatorSlot ? '#a78bfa' : TEAM_COLOR[team]) : 'rgba(255,255,255,0.15)' }}>
+          {player ? (isBot ? '🤖' : isSpectatorSlot ? '👁' : '●') : '○'}
+        </span>
+        <div className="flex-1 min-w-0">
+          {player ? (
+            <div className="flex items-center gap-2">
+              <span className="text-sm font-bold text-white truncate">{player.name}</span>
+              {isMe && (
+                <span className="text-xs px-1.5 py-0.5 rounded font-cinzel"
+                  style={{ background: 'rgba(212,175,55,0.15)', color: '#d4af37' }}>You</span>
+              )}
+              {isBot && (
+                <span className="text-xs text-purple-400 px-1.5 py-0.5 rounded font-cinzel"
+                  style={{ background: 'rgba(167,139,250,0.1)' }}>Bot</span>
+              )}
+            </div>
+          ) : (
+            <span className="text-sm text-gray-600 italic">
+              {isSpectatorSlot ? 'Watching slot' : 'Empty seat'}
+            </span>
+          )}
+          {!isSpectatorSlot && (
+            <span className="text-xs text-gray-500">
+              {SEAT_LABEL[pos]} · Team {team === 0 ? 'A' : 'B'}
+            </span>
+          )}
+          {isSpectatorSlot && player && (
+            <span className="text-xs text-purple-400">Spectating</span>
+          )}
+        </div>
+      </div>
+    )
+  }
+
   return (
     <div className="min-h-screen felt flex flex-col items-center justify-center p-4 gap-6">
-      {/* Header */}
       <div className="text-center">
         <h2 className="font-cinzel font-black text-3xl" style={{ color: '#f0d060' }}>Waiting for Players</h2>
-        <p className="text-gray-400 text-sm mt-1">Need {4 - players.length} more player{4 - players.length !== 1 ? 's' : ''}</p>
+        <p className="text-gray-400 text-sm mt-1">Need {4 - activePlayers.length} more player{4 - activePlayers.length !== 1 ? 's' : ''} to start</p>
       </div>
 
       {/* Room code */}
@@ -42,57 +88,21 @@ export default function WaitingRoom({ room, myId, roomCode, onBack, onAddBots })
           }}>
           {copied ? '✓ Link Copied!' : '⎘ Copy Join Link'}
         </button>
-        <p className="text-gray-600 text-xs mt-3">Share this code with friends to join</p>
+        <p className="text-gray-600 text-xs mt-3">Share this link or code with up to 7 friends</p>
       </div>
 
-      {/* Players list */}
+      {/* Players (active seats 0-3) */}
       <div className="rounded-2xl p-4 w-full max-w-sm shadow-xl"
         style={{ background: 'rgba(10,14,26,0.95)', border: '1px solid rgba(255,255,255,0.08)' }}>
         <p className="text-xs text-gray-500 font-cinzel tracking-widest uppercase mb-3 text-center">
-          Players ({players.length}/4)
+          Players ({activePlayers.length}/4)
         </p>
         <div className="space-y-2">
-          {[0, 1, 2, 3].map((pos) => {
-            const player = players.find((p) => p.position === pos)
-            const isMe   = player?.id === myId
-            const isBot  = player?.id?.startsWith('__bot__')
-            const team   = pos % 2
-            return (
-              <div key={pos}
-                className="flex items-center gap-3 px-3 py-2 rounded-lg transition-all"
-                style={{
-                  background: player ? 'rgba(255,255,255,0.06)' : 'rgba(255,255,255,0.02)',
-                  border: `1px solid ${player ? 'rgba(255,255,255,0.1)' : 'rgba(255,255,255,0.04)'}`,
-                }}>
-                <span className="text-lg" style={{ color: player ? TEAM_COLOR[team] : 'rgba(255,255,255,0.15)' }}>
-                  {player ? (isBot ? '🤖' : '●') : '○'}
-                </span>
-                <div className="flex-1 min-w-0">
-                  {player ? (
-                    <div className="flex items-center gap-2">
-                      <span className="text-sm font-bold text-white truncate">{player.name}</span>
-                      {isMe && (
-                        <span className="text-xs text-gold px-1.5 py-0.5 rounded font-cinzel"
-                          style={{ background: 'rgba(212,175,55,0.15)' }}>You</span>
-                      )}
-                      {isBot && (
-                        <span className="text-xs text-purple-400 px-1.5 py-0.5 rounded font-cinzel"
-                          style={{ background: 'rgba(167,139,250,0.1)' }}>Bot</span>
-                      )}
-                    </div>
-                  ) : (
-                    <span className="text-sm text-gray-600 italic">Empty seat</span>
-                  )}
-                  <span className="text-xs text-gray-500">{SEAT_LABEL[pos]} · Team {team === 0 ? 'A' : 'B'}</span>
-                </div>
-              </div>
-            )
-          })}
+          {[0, 1, 2, 3].map(pos => <Slot key={pos} pos={pos} isSpectatorSlot={false} />)}
         </div>
 
-        {/* Teams */}
         <div className="mt-4 pt-3 border-t flex justify-around text-xs" style={{ borderColor: 'rgba(255,255,255,0.08)' }}>
-          {[0, 1].map((t) => (
+          {[0, 1].map(t => (
             <div key={t} className="flex flex-col items-center gap-1">
               <span style={{ color: TEAM_COLOR[t] }}>Team {t === 0 ? 'A' : 'B'}</span>
               <span className="text-gray-500">Seats {t === 0 ? '0 & 2' : '1 & 3'} (partners)</span>
@@ -101,21 +111,34 @@ export default function WaitingRoom({ room, myId, roomCode, onBack, onAddBots })
         </div>
       </div>
 
-      {/* 🤖 Solo Test Button */}
+      {/* Spectators (slots 4-7) */}
+      <div className="rounded-2xl p-4 w-full max-w-sm shadow-xl"
+        style={{ background: 'rgba(10,14,26,0.95)', border: '1px solid rgba(167,139,250,0.12)' }}>
+        <p className="text-xs font-cinzel tracking-widest uppercase mb-3 text-center" style={{ color: 'rgba(167,139,250,0.6)' }}>
+          👁 Spectators ({spectators.length}/4)
+        </p>
+        <div className="space-y-2">
+          {[4, 5, 6, 7].map(pos => <Slot key={pos} pos={pos} isSpectatorSlot={true} />)}
+        </div>
+        <p className="text-xs text-gray-600 text-center mt-3">
+          Extra friends can watch and chat without playing
+        </p>
+      </div>
+
+      {/* Bot button */}
       {canAddBots && (
         <div className="w-full max-w-sm fade-up">
-          <button
-            onClick={onAddBots}
+          <button onClick={onAddBots}
             className="w-full py-3 rounded-xl font-cinzel font-bold text-sm tracking-wider transition-all hover:scale-[1.02] active:scale-[0.98]"
             style={{
               background: 'linear-gradient(135deg, rgba(139,92,246,0.3), rgba(109,40,217,0.4))',
               border: '1.5px solid rgba(167,139,250,0.5)',
               color: '#c4b5fd',
             }}>
-            🤖 Test Solo — Add 3 Bots
+            🤖 Test Solo — Add {4 - activePlayers.length} Bot{4 - activePlayers.length !== 1 ? 's' : ''}
           </button>
           <p className="text-center text-xs text-gray-600 mt-2">
-            Bots will auto-play so you can preview the UI
+            Bots auto-play so you can preview the UI
           </p>
         </div>
       )}

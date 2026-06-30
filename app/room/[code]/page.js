@@ -14,21 +14,27 @@ export default function RoomPage() {
   const { code } = useParams()
   const router   = useRouter()
 
-  const [myId, setMyId]             = useState(null)
-  const [myPosition, setMyPosition] = useState(null)
-  const [myTeam, setMyTeam]         = useState(null)
-  const [myHand, setMyHand]         = useState([])
-  const [room, setRoom]             = useState(null)
-  const [phase, setPhase]           = useState('connecting')
-  const [messages, setMessages]     = useState([])
-  const [nameInput, setNameInput]   = useState('')
-  const [hasJoined, setHasJoined]   = useState(false)
-  const [error, setError]           = useState('')
-  const [showChat, setShowChat]     = useState(false)
-  const [trickBanner, setTrickBanner] = useState(null) // { name, team, isKot }
-  const socketRef    = useRef(null)
-  const bannerTimer  = useRef(null)
-  const prevTrickRef = useRef(null) // keep last trick cards visible
+  const [myId, setMyId]               = useState(null)
+  const [myPosition, setMyPosition]   = useState(null)
+  const [myTeam, setMyTeam]           = useState(null)
+  const [myHand, setMyHand]           = useState([])
+  const [room, setRoom]               = useState(null)
+  const [phase, setPhase]             = useState('connecting')
+  const [messages, setMessages]       = useState([])
+  const [nameInput, setNameInput]     = useState('')
+  const [hasJoined, setHasJoined]     = useState(false)
+  const [error, setError]             = useState('')
+  const [showChat, setShowChat]       = useState(false)
+  const [unreadCount, setUnreadCount] = useState(0)
+  const [trickBanner, setTrickBanner] = useState(null)
+
+  const socketRef     = useRef(null)
+  const bannerTimer   = useRef(null)
+  const prevTrickRef  = useRef(null)
+  const showChatRef   = useRef(false)
+
+  // Keep ref in sync so socket closure can read current value
+  useEffect(() => { showChatRef.current = showChat }, [showChat])
 
   function showTrickWinner(lastResult, players) {
     if (!lastResult) return
@@ -51,30 +57,47 @@ export default function RoomPage() {
         setMyId(socket.id)
         if (storedName) autoJoin(socket, storedName)
       })
+
       socket.on('room-created', ({ code: newCode, player }) => {
         window.history.replaceState(null, '', '/room/' + newCode)
+        sessionStorage.setItem('chakdi_room', newCode)
         setMyPosition(player.position)
         setMyTeam(player.team)
         setHasJoined(true)
         setError('')
       })
-      socket.on('room-joined', ({ player }) => {
+
+      socket.on('room-joined', ({ code: joinedCode, player }) => {
+        if (joinedCode) {
+          sessionStorage.setItem('chakdi_room', joinedCode)
+          window.history.replaceState(null, '', '/room/' + joinedCode)
+        }
         setMyPosition(player.position)
         setMyTeam(player.team)
         setHasJoined(true)
         setError('')
       })
+
+      socket.on('rejoin-failed', () => {
+        // Couldn't rejoin — try fresh
+        sessionStorage.removeItem('chakdi_room')
+        const name = sessionStorage.getItem('chakdi_name') || ''
+        if (name) {
+          const upper = code.toUpperCase()
+          if (upper === 'NEW') {
+            socket.emit('create-room', { name, mode: sessionStorage.getItem('chakdi_mode') || 'chakdi' })
+          } else {
+            socket.emit('join-room', { name, code: upper })
+          }
+        }
+      })
+
       socket.on('game-state', ({ room: r, myHand: h }) => {
-        // When a trick just completed, keep last trick cards visible for a moment
         if (r.lastTrickResult && r.currentTrick.length === 0) {
           prevTrickRef.current = r.lastTrickResult.trick
           showTrickWinner(r.lastTrickResult, r.players)
         }
-        // New trick started — clear the stale cards
-        if (r.currentTrick.length > 0) {
-          prevTrickRef.current = null
-        }
-        // New hand started — reset
+        if (r.currentTrick.length > 0) prevTrickRef.current = null
         if (r.phase === 'trump-selection') {
           prevTrickRef.current = null
           setTrickBanner(null)
@@ -83,18 +106,31 @@ export default function RoomPage() {
         setPhase(r.phase)
         setMyHand(h || [])
       })
+
       socket.on('room-error', (msg) => setError(msg))
-      socket.on('chat-msg', (msg) => setMessages(prev => [...prev.slice(-49), msg]))
+
+      socket.on('chat-msg', (msg) => {
+        setMessages(prev => [...prev.slice(-49), msg])
+        if (!showChatRef.current) setUnreadCount(prev => prev + 1)
+      })
     })
     return () => { socket?.disconnect(); clearTimeout(bannerTimer.current) }
   }, []) // eslint-disable-line
 
   function autoJoin(socket, name) {
-    const upper = code.toUpperCase()
+    const upper   = code.toUpperCase()
+    const savedRoom = sessionStorage.getItem('chakdi_room')
+
     if (upper === 'NEW') {
-      socket.emit('create-room', { name, mode: sessionStorage.getItem('chakdi_mode') || 'chakdi' })
+      if (savedRoom) {
+        // Try to rejoin their previous room
+        socket.emit('rejoin-room', { name, code: savedRoom })
+      } else {
+        socket.emit('create-room', { name, mode: sessionStorage.getItem('chakdi_mode') || 'chakdi' })
+      }
     } else {
-      socket.emit('join-room', { name, code: upper })
+      // Always try rejoin first (handles both returning players and new joins gracefully)
+      socket.emit('rejoin-room', { name, code: upper })
     }
   }
 
@@ -105,21 +141,31 @@ export default function RoomPage() {
     autoJoin(socketRef.current, nameInput.trim())
   }
 
+  function toggleChat() {
+    setShowChat(v => {
+      if (!v) setUnreadCount(0)
+      return !v
+    })
+  }
+
   const emit = (ev, data) => socketRef.current?.emit(ev, data)
 
   // ── Derived ──
-  const players  = room?.players || []
-  const me       = players.find(p => p.position === myPosition)
-  const partner  = players.find(p => p.position === ((myPosition + 2) % 4))
-  const leftOpp  = players.find(p => p.position === ((myPosition + 3) % 4))
-  const rightOpp = players.find(p => p.position === ((myPosition + 1) % 4))
-  const isMyTurn = room?.currentTurn === myId && phase === 'playing'
+  const players     = room?.players || []
+  const me          = players.find(p => p.position === myPosition)
+  const isSpectator = me?.isSpectator || false
 
-  // Show current trick OR last trick cards (keeps 4 cards visible after trick ends)
+  // Active players around the table; spectators see from position-0's perspective
+  const bottomPlayer = isSpectator ? players.find(p => p.position === 0) : me
+  const topPlayer    = isSpectator ? players.find(p => p.position === 2) : players.find(p => p.position === ((myPosition + 2) % 4))
+  const leftPlayer   = isSpectator ? players.find(p => p.position === 3) : players.find(p => p.position === ((myPosition + 3) % 4))
+  const rightPlayer  = isSpectator ? players.find(p => p.position === 1) : players.find(p => p.position === ((myPosition + 1) % 4))
+
+  const isMyTurn = !isSpectator && room?.currentTurn === myId && phase === 'playing'
+
   function trickCard(pid) {
     const live = room?.currentTrick || []
     if (live.length > 0) return live.find(t => t.playerId === pid)?.card || null
-    // Fallback: show last completed trick until next card played
     const last = prevTrickRef.current || []
     return last.find(t => t.playerId === pid)?.card || null
   }
@@ -179,23 +225,16 @@ export default function RoomPage() {
     )
   }
 
-  // Trick slot — shows card if played, dashed placeholder if in-progress, nothing otherwise
   function TrickSlot({ player }) {
     if (!player) return <div style={{ width: 68, height: 100 }} />
     const card    = trickCard(player.id)
     const inTrick = (room?.currentTrick?.length || 0) > 0 || (prevTrickRef.current?.length || 0) > 0
-    if (card) {
-      return (
-        <div className="fade-up">
-          <Card suit={card.suit} rank={card.rank} />
-        </div>
-      )
-    }
-    if (inTrick) {
-      return (
-        <div style={{ width: 68, height: 100, borderRadius: 8, border: '2px dashed rgba(255,255,255,0.12)' }} />
-      )
-    }
+    if (card) return (
+      <div className="fade-up"><Card suit={card.suit} rank={card.rank} /></div>
+    )
+    if (inTrick) return (
+      <div style={{ width: 68, height: 100, borderRadius: 8, border: '2px dashed rgba(255,255,255,0.12)' }} />
+    )
     return <div style={{ width: 68, height: 100 }} />
   }
 
@@ -227,7 +266,7 @@ export default function RoomPage() {
   if (phase === 'connecting' || phase === 'waiting') {
     return (
       <WaitingRoom room={room} myId={myId} roomCode={roomCode}
-        onBack={() => router.push('/')}
+        onBack={() => { sessionStorage.removeItem('chakdi_room'); router.push('/') }}
         onAddBots={() => emit('add-bots')} />
     )
   }
@@ -239,24 +278,29 @@ export default function RoomPage() {
       <div className="min-h-screen felt flex flex-col items-center justify-center gap-6 p-4">
         <div className="text-center">
           <h2 className="font-cinzel font-black text-3xl mb-1" style={{ color: '#f0d060' }}>Call Trump (Rang)</h2>
-          {iAmCaller
-            ? <p className="text-gray-300 text-sm mt-1">Look at your 5 cards and choose the trump suit</p>
-            : <p className="text-gray-400 text-sm mt-1">
-                Waiting for <span className="font-bold text-white">{callerName}</span> to call trump…
-              </p>
-          }
+          {isSpectator ? (
+            <p className="text-purple-400 text-sm mt-1">👁 Watching — {callerName} is choosing trump…</p>
+          ) : iAmCaller ? (
+            <p className="text-gray-300 text-sm mt-1">Look at your 5 cards and choose the trump suit</p>
+          ) : (
+            <p className="text-gray-400 text-sm mt-1">
+              Waiting for <span className="font-bold text-white">{callerName}</span> to call trump…
+            </p>
+          )}
         </div>
-        {iAmCaller && <TrumpSelector onSelect={suit => emit('select-trump', { suit })} />}
-        <div className="text-center">
-          <p className="text-xs text-gray-500 font-cinzel tracking-wider mb-3 uppercase">Your 5 Cards</p>
-          <div className="hand-fan justify-center">
-            {myHand.map((c, i) => (
-              <div key={c.suit + c.rank} className="card-deal" style={{ animationDelay: `${i * 0.07}s` }}>
-                <Card suit={c.suit} rank={c.rank} />
-              </div>
-            ))}
+        {iAmCaller && !isSpectator && <TrumpSelector onSelect={suit => emit('select-trump', { suit })} />}
+        {!isSpectator && (
+          <div className="text-center">
+            <p className="text-xs text-gray-500 font-cinzel tracking-wider mb-3 uppercase">Your 5 Cards</p>
+            <div className="hand-fan justify-center">
+              {myHand.map((c, i) => (
+                <div key={c.suit + c.rank} className="card-deal" style={{ animationDelay: `${i * 0.07}s` }}>
+                  <Card suit={c.suit} rank={c.rank} />
+                </div>
+              ))}
+            </div>
           </div>
-        </div>
+        )}
       </div>
     )
   }
@@ -276,6 +320,12 @@ export default function RoomPage() {
           <button onClick={() => { navigator.clipboard.writeText(window.location.href) }}
             className="text-[11px] px-1.5 py-0.5 rounded text-gray-500 hover:text-gold"
             style={{ border: '1px solid rgba(212,175,55,0.2)' }}>⎘</button>
+          {isSpectator && (
+            <span className="text-[11px] px-2 py-0.5 rounded font-cinzel"
+              style={{ background: 'rgba(167,139,250,0.15)', color: '#a78bfa', border: '1px solid rgba(167,139,250,0.3)' }}>
+              👁 Watching
+            </span>
+          )}
         </div>
         <div className="flex items-center gap-2 flex-wrap">
           {room?.trump && (
@@ -287,16 +337,6 @@ export default function RoomPage() {
             </div>
           )}
           <div className="flex gap-1 text-xs">
-            <span className="px-2 py-1 rounded font-cinzel"
-              style={{ background: 'rgba(96,165,250,0.15)', color: '#60a5fa', border: '1px solid rgba(96,165,250,0.2)' }}>
-              You {room?.trickCounts?.[myTeam ?? 0] ?? 0}
-            </span>
-            <span className="px-2 py-1 rounded font-cinzel"
-              style={{ background: 'rgba(248,113,113,0.15)', color: '#f87171', border: '1px solid rgba(248,113,113,0.2)' }}>
-              Opp {room?.trickCounts?.[myTeam === 0 ? 1 : 0] ?? 0}
-            </span>
-          </div>
-          <div className="flex gap-1 text-xs">
             {[0, 1].map(t => (
               <div key={t} className="flex items-center gap-1 px-2 py-1 rounded font-cinzel"
                 style={{ background: myTeam === t ? 'rgba(212,175,55,0.15)' : 'rgba(255,255,255,0.06)', border: `1px solid ${myTeam === t ? 'rgba(212,175,55,0.35)' : 'rgba(255,255,255,0.08)'}` }}>
@@ -306,15 +346,32 @@ export default function RoomPage() {
               </div>
             ))}
           </div>
-          <button onClick={() => setShowChat(v => !v)}
-            className="text-xs px-2 py-1 rounded"
+          <div className="flex gap-1 text-xs">
+            <span className="px-2 py-1 rounded font-cinzel"
+              style={{ background: 'rgba(96,165,250,0.15)', color: '#60a5fa', border: '1px solid rgba(96,165,250,0.2)' }}>
+              A {room?.trickCounts?.[0] ?? 0}
+            </span>
+            <span className="px-2 py-1 rounded font-cinzel"
+              style={{ background: 'rgba(248,113,113,0.15)', color: '#f87171', border: '1px solid rgba(248,113,113,0.2)' }}>
+              B {room?.trickCounts?.[1] ?? 0}
+            </span>
+          </div>
+          {/* Chat button with unread dot */}
+          <button onClick={toggleChat}
+            className="relative text-xs px-2 py-1 rounded"
             style={{ background: showChat ? 'rgba(212,175,55,0.2)' : 'rgba(255,255,255,0.07)', color: showChat ? '#f0d060' : '#555', border: '1px solid rgba(255,255,255,0.1)' }}>
             💬
+            {unreadCount > 0 && (
+              <span className="absolute -top-1.5 -right-1.5 min-w-[16px] h-4 px-0.5 rounded-full text-[9px] font-bold flex items-center justify-center"
+                style={{ background: '#ef4444', color: '#fff' }}>
+                {unreadCount > 9 ? '9+' : unreadCount}
+              </span>
+            )}
           </button>
         </div>
       </div>
 
-      {/* ── TRICK WINNER BANNER ── big bold centered ── */}
+      {/* ── TRICK WINNER BANNER ── */}
       {trickBanner && (
         <div className="absolute left-1/2 -translate-x-1/2 z-50 fade-up pointer-events-none"
           style={{ top: '56px' }}>
@@ -343,29 +400,23 @@ export default function RoomPage() {
         {/* ── TABLE ── */}
         <div className="flex-1 flex flex-col min-w-0 overflow-hidden py-3 px-4 gap-2">
 
-          {/* ── ROW 1: Partner ── */}
+          {/* ROW 1: Top (partner or pos 2) */}
           <div className="flex flex-col items-center gap-1.5 flex-shrink-0">
-            <PlayerTag player={partner} />
-            <FaceDownFan count={partner?.cardCount} horizontal />
-            {/* Partner's trick card */}
-            <div className="mt-1">
-              <TrickSlot player={partner} />
-            </div>
+            <PlayerTag player={topPlayer} />
+            <FaceDownFan count={topPlayer?.cardCount} horizontal />
+            <div className="mt-1"><TrickSlot player={topPlayer} /></div>
           </div>
 
-          {/* ── ROW 2: Left | Center | Right ── */}
+          {/* ROW 2: Left | Center | Right */}
           <div className="flex flex-1 items-center gap-3 min-h-0">
-
-            {/* Left opponent */}
             <div className="flex flex-col items-center gap-1.5 flex-shrink-0">
-              <PlayerTag player={leftOpp} />
-              <FaceDownFan count={leftOpp?.cardCount} horizontal={false} />
-              <TrickSlot player={leftOpp} />
+              <PlayerTag player={leftPlayer} />
+              <FaceDownFan count={leftPlayer?.cardCount} horizontal={false} />
+              <TrickSlot player={leftPlayer} />
             </div>
 
-            {/* ── CENTER ── */}
+            {/* Center */}
             <div className="flex-1 flex items-center justify-center">
-              {/* Turn indicator — only when no banner showing */}
               {!trickBanner && (
                 <div className="rounded-xl px-4 py-2 text-center"
                   style={{ background: 'rgba(0,0,0,0.35)', border: '1px solid rgba(255,255,255,0.07)' }}>
@@ -380,39 +431,40 @@ export default function RoomPage() {
               )}
             </div>
 
-            {/* Right opponent */}
             <div className="flex flex-col items-center gap-1.5 flex-shrink-0">
-              <PlayerTag player={rightOpp} />
-              <FaceDownFan count={rightOpp?.cardCount} horizontal={false} />
-              <TrickSlot player={rightOpp} />
+              <PlayerTag player={rightPlayer} />
+              <FaceDownFan count={rightPlayer?.cardCount} horizontal={false} />
+              <TrickSlot player={rightPlayer} />
             </div>
           </div>
 
-          {/* ── ROW 3: My trick card + hand ── */}
+          {/* ROW 3: Bottom player + hand */}
           <div className="flex flex-col items-center gap-1.5 flex-shrink-0">
-            {/* My played card in trick */}
-            <TrickSlot player={me} />
-            <PlayerTag player={me} isMine />
+            <TrickSlot player={bottomPlayer} />
+            <PlayerTag player={bottomPlayer} isMine={!isSpectator} />
             {isMyTurn && (
-              <div className="text-xs font-cinzel text-yellow-400 animate-pulse">
-                Play a card ↓
+              <div className="text-xs font-cinzel text-yellow-400 animate-pulse">Play a card ↓</div>
+            )}
+            {isSpectator ? (
+              <div className="py-3 text-center">
+                <span className="text-gray-600 font-cinzel text-xs tracking-wider">👁 Spectating — you can chat on the right</span>
+              </div>
+            ) : (
+              <div className="w-full overflow-x-auto pb-1" style={{ scrollbarWidth: 'thin' }}>
+                <div className="hand-fan px-2" style={{ minWidth: 'max-content', margin: '0 auto', justifyContent: 'center' }}>
+                  {myHand.map((card, i) => {
+                    const playable = canPlay(card)
+                    return (
+                      <div key={card.suit + card.rank} className="card-deal" style={{ animationDelay: `${i * 0.04}s` }}>
+                        <Card suit={card.suit} rank={card.rank}
+                          playable={playable}
+                          onClick={() => playable && emit('play-card', { card })} />
+                      </div>
+                    )
+                  })}
+                </div>
               </div>
             )}
-            {/* Hand with deal animation */}
-            <div className="w-full overflow-x-auto pb-1" style={{ scrollbarWidth: 'thin' }}>
-              <div className="hand-fan px-2" style={{ minWidth: 'max-content', margin: '0 auto', justifyContent: 'center' }}>
-                {myHand.map((card, i) => {
-                  const playable = canPlay(card)
-                  return (
-                    <div key={card.suit + card.rank} className="card-deal" style={{ animationDelay: `${i * 0.04}s` }}>
-                      <Card suit={card.suit} rank={card.rank}
-                        playable={playable}
-                        onClick={() => playable && emit('play-card', { card })} />
-                    </div>
-                  )
-                })}
-              </div>
-            </div>
           </div>
         </div>
 
@@ -449,11 +501,14 @@ export default function RoomPage() {
                 </div>
               ))}
             </div>
-            <button onClick={() => emit('next-hand')}
-              className="w-full py-3 rounded-xl font-cinzel font-bold text-sm tracking-widest"
-              style={{ background: 'linear-gradient(135deg, #d4af37, #a0852a)', color: '#0a0e1a' }}>
-              DEAL NEXT HAND
-            </button>
+            {!isSpectator && (
+              <button onClick={() => emit('next-hand')}
+                className="w-full py-3 rounded-xl font-cinzel font-bold text-sm tracking-widest"
+                style={{ background: 'linear-gradient(135deg, #d4af37, #a0852a)', color: '#0a0e1a' }}>
+                DEAL NEXT HAND
+              </button>
+            )}
+            {isSpectator && <p className="text-gray-500 text-xs font-cinzel">Waiting for players to continue…</p>}
           </div>
         </div>
       )}
@@ -464,27 +519,33 @@ export default function RoomPage() {
           style={{ background: 'rgba(0,0,0,0.82)' }}>
           <div className="rounded-2xl p-8 text-center shadow-2xl w-full max-w-sm fade-up"
             style={{ background: 'rgba(10,14,26,0.98)', border: '1px solid rgba(212,175,55,0.5)' }}>
-            <div className="text-5xl mb-3">{room?.winner === myTeam ? '🏆' : '😔'}</div>
+            <div className="text-5xl mb-3">{isSpectator ? '🏆' : room?.winner === myTeam ? '🏆' : '😔'}</div>
             <div className="font-cinzel font-black text-3xl mb-2"
-              style={{ color: room?.winner === myTeam ? '#f0d060' : '#f87171' }}>
-              {room?.winner === myTeam ? 'YOU WIN!' : 'You Lost'}
+              style={{ color: isSpectator ? '#f0d060' : room?.winner === myTeam ? '#f0d060' : '#f87171' }}>
+              {isSpectator
+                ? `Team ${room?.winner === 0 ? 'A' : 'B'} Wins!`
+                : room?.winner === myTeam ? 'YOU WIN!' : 'You Lost'}
             </div>
             <div className="flex justify-around my-6">
               {[0, 1].map(t => (
                 <div key={t} className="flex flex-col items-center gap-1">
-                  <span className="text-xs font-cinzel" style={{ color: TEAM_COLOR[t] }}>{t === myTeam ? 'You' : 'Opp'}</span>
+                  <span className="text-xs font-cinzel" style={{ color: TEAM_COLOR[t] }}>
+                    {isSpectator ? `Team ${t === 0 ? 'A' : 'B'}` : t === myTeam ? 'You' : 'Opp'}
+                  </span>
                   <span className="text-3xl font-bold text-white">{room?.scores?.[t] ?? 0}</span>
                   <span className="text-xs text-gray-500">points</span>
                 </div>
               ))}
             </div>
             <div className="flex gap-3">
-              <button onClick={() => emit('reset-game')}
-                className="flex-1 py-3 rounded-xl font-cinzel font-bold text-sm tracking-wider"
-                style={{ background: 'linear-gradient(135deg, #d4af37, #a0852a)', color: '#0a0e1a' }}>
-                PLAY AGAIN
-              </button>
-              <button onClick={() => router.push('/')}
+              {!isSpectator && (
+                <button onClick={() => emit('reset-game')}
+                  className="flex-1 py-3 rounded-xl font-cinzel font-bold text-sm tracking-wider"
+                  style={{ background: 'linear-gradient(135deg, #d4af37, #a0852a)', color: '#0a0e1a' }}>
+                  PLAY AGAIN
+                </button>
+              )}
+              <button onClick={() => { sessionStorage.removeItem('chakdi_room'); router.push('/') }}
                 className="flex-1 py-3 rounded-xl font-cinzel font-bold text-sm"
                 style={{ background: 'rgba(255,255,255,0.08)', border: '1px solid rgba(255,255,255,0.15)' }}>
                 HOME
